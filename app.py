@@ -371,18 +371,38 @@ elif page == "📊 Strategic Analytics":
             else:
                 b_vals = plot_df[plot_df["Is_Bulk"] == 1][feat].dropna().values
                 r_vals = plot_df[plot_df["Is_Bulk"] == 0][feat].dropna().values
-                fig = ff.create_distplot(
-                    [b_vals, r_vals],
-                    group_labels=["Bulk / Wholesale", "Individual / Retail"],
-                    colors=["#39FF14", "#00C6FF"],
-                    show_hist=False,
-                    show_rug=False,
-                )
-                fig.update_layout(
-                    title=f"{feat} Kernel Density Estimate (KDE)",
-                    xaxis_title=feat,
-                    yaxis_title="Density",
-                )
+import numpy as np
+import plotly.graph_objects as go
+from scipy.stats import gaussian_kde
+
+fig = go.Figure()
+
+for label, vals, color in [
+    ("Bulk / Wholesale", b_vals, "#39FF14"),
+    ("Individual / Retail", r_vals, "#00C6FF"),
+]:
+  clean_vals = np.asarray(vals, dtype=float)
+  clean_vals = clean_vals[np.isfinite(clean_vals)]
+
+  if len(clean_vals) > 1 and np.std(clean_vals) > 0:
+    kde = gaussian_kde(clean_vals)
+    x_grid = np.linspace(clean_vals.min(), clean_vals.max(), 200)
+    fig.add_trace(
+        go.Scatter(
+            x=x_grid,
+            y=kde(x_grid),
+            mode="lines",
+            name=label,
+            fill="tozeroy",
+            line=dict(color=color, width=2),
+        )
+    )
+
+fig.update_layout(
+    title=f"{feat} Kernel Density Estimate (KDE)",
+    xaxis_title=feat,
+    yaxis_title="Density",
+)
             fig = apply_transparent_plotly(fig)
             st.plotly_chart(fig, use_container_width=True)
 
