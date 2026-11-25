@@ -405,10 +405,9 @@ fig.update_layout(
 )
 fig = apply_transparent_plotly(fig)
 st.plotly_chart(fig, use_container_width=True)
-
-        with insight_col:
-            imp_pct = importances.get(feat, 0.0) * 100
-            st.markdown(f"### 🧠 Model Attribution: `{feat}`")
+ with insight_col:
+  imp_pct = importances.get(feat, 0.0) * 100
+  st.markdown(f"### 🧠 Model Attribution: `{feat}`")
             st.markdown(f"**Random Forest Importance:** `{imp_pct:.2f}%`")
             st.markdown("---")
             st.markdown(f"**SHAP-Style Impact Analysis:**\n\n{shap_narratives[feat]}")
