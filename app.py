@@ -4,8 +4,7 @@ import numpy as np
 import joblib
 import plotly.express as px
 import plotly.graph_objects as go
-import plotly.figure_factory as ff
-from scipy.stats import ks_2samp, entropy
+from scipy.stats import ks_2samp, entropy, gaussian_kde
 from sklearn.decomposition import PCA
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.pipeline import Pipeline
@@ -17,6 +16,7 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
 
 def inject_ecommerce_css():
     st.markdown(
@@ -81,107 +81,178 @@ def inject_ecommerce_css():
         unsafe_allow_html=True,
     )
 
+
 inject_ecommerce_css()
 
 FEATURE_COLS = [
-    "Quantity", "UnitPrice", "Is_UK", "Is_Guest",
-    "Hour", "DayOfWeek", "Month", "Unique_SKUs"
+    "Quantity",
+    "UnitPrice",
+    "Is_UK",
+    "Is_Guest",
+    "Hour",
+    "DayOfWeek",
+    "Month",
+    "Unique_SKUs",
 ]
+
 
 @st.cache_data
 def load_ecommerce_data():
     try:
         try:
-            raw_df = pd.read_excel("Online Retail.xlsx", dtype={"InvoiceNo": str, "StockCode": str})
+            raw_df = pd.read_excel(
+                "Online Retail.xlsx", dtype={"InvoiceNo": str, "StockCode": str}
+            )
         except FileNotFoundError:
-            raw_df = pd.read_csv("OnlineRetail.csv", encoding="ISO-8859-1", dtype={"InvoiceNo": str, "StockCode": str})
+            raw_df = pd.read_csv(
+                "OnlineRetail.csv",
+                encoding="ISO-8859-1",
+                dtype={"InvoiceNo": str, "StockCode": str},
+            )
 
         raw_df["InvoiceDate"] = pd.to_datetime(raw_df["InvoiceDate"], errors="coerce")
         raw_df["UnitPrice"] = pd.to_numeric(raw_df["UnitPrice"], errors="coerce")
         raw_df["Quantity"] = pd.to_numeric(raw_df["Quantity"], errors="coerce")
-        raw_df.dropna(subset=["InvoiceNo", "InvoiceDate", "Quantity", "UnitPrice"], inplace=True)
+        raw_df.dropna(
+            subset=["InvoiceNo", "InvoiceDate", "Quantity", "UnitPrice"], inplace=True
+        )
 
-        invoice_customer_map = raw_df.groupby("InvoiceNo")["CustomerID"].transform("first")
-        raw_df["CustomerID"] = raw_df["CustomerID"].fillna(invoice_customer_map)
-        raw_df["Is_Guest"] = raw_df["CustomerID"].isna().astype(int)
+        if "CustomerID" in raw_df.columns:
+            invoice_customer_map = raw_df.groupby("InvoiceNo")["CustomerID"].transform(
+                "first"
+            )
+            raw_df["CustomerID"] = raw_df["CustomerID"].fillna(invoice_customer_map)
+            raw_df["Is_Guest"] = raw_df["CustomerID"].isna().astype(int)
+        else:
+            raw_df["Is_Guest"] = 1
 
-        sales_df = raw_df[(raw_df["UnitPrice"] > 0) & (~raw_df["InvoiceNo"].str.startswith("C", na=False)) & (raw_df["Quantity"] > 0)].copy()
+        sales_df = raw_df[
+            (raw_df["UnitPrice"] > 0)
+            & (~raw_df["InvoiceNo"].str.startswith("C", na=False))
+            & (raw_df["Quantity"] > 0)
+        ].copy()
+
         sales_df["LineRevenue"] = sales_df["Quantity"] * sales_df["UnitPrice"]
-        sales_df["Is_UK"] = (sales_df["Country"] == "United Kingdom").astype(int)
+        sales_df["Is_UK"] = (
+            (sales_df["Country"] == "United Kingdom").astype(int)
+            if "Country" in sales_df.columns
+            else 0
+        )
         sales_df["Hour"] = sales_df["InvoiceDate"].dt.hour
         sales_df["DayOfWeek"] = sales_df["InvoiceDate"].dt.dayofweek
         sales_df["Month"] = sales_df["InvoiceDate"].dt.month
 
-        df = sales_df.groupby("InvoiceNo").agg(
-            Quantity=("Quantity", "sum"),
-            UnitPrice=("UnitPrice", "mean"),
-            Is_UK=("Is_UK", "first"),
-            Is_Guest=("Is_Guest", "first"),
-            Hour=("Hour", "first"),
-            DayOfWeek=("DayOfWeek", "first"),
-            Month=("Month", "first"),
-            Unique_SKUs=("StockCode", "nunique"),
-            TotalRevenue=("LineRevenue", "sum")
-        ).reset_index()
-
-        df["Is_Bulk"] = np.where((df["Quantity"] >= 50) | (df["TotalRevenue"] >= 500), 1, 0)
+        df = (
+            sales_df.groupby("InvoiceNo")
+            .agg(
+                Quantity=("Quantity", "sum"),
+                UnitPrice=("UnitPrice", "mean"),
+                Is_UK=("Is_UK", "first"),
+                Is_Guest=("Is_Guest", "first"),
+                Hour=("Hour", "first"),
+                DayOfWeek=("DayOfWeek", "first"),
+                Month=("Month", "first"),
+                Unique_SKUs=("StockCode", "nunique"),
+                TotalRevenue=("LineRevenue", "sum"),
+            )
+            .reset_index()
+        )
+        df["Is_Bulk"] = np.where(
+            (df["Quantity"] >= 50) | (df["TotalRevenue"] >= 500), 1, 0
+        )
 
     except FileNotFoundError:
         rng = np.random.default_rng(42)
         n_retail, n_bulk = 14500, 4000
 
-        retail_data = pd.DataFrame({
-            "Quantity": rng.integers(1, 35, n_retail),
-            "UnitPrice": rng.uniform(1.5, 25.0, n_retail),
-            "Is_UK": rng.choice([1, 0], size=n_retail, p=[0.90, 0.10]),
-            "Is_Guest": rng.choice([0, 1], size=n_retail, p=[0.85, 0.15]),
-            "Hour": rng.integers(8, 20, n_retail),
-            "DayOfWeek": rng.integers(0, 7, n_retail),
-            "Month": rng.choice(range(1, 13), size=n_retail),
-            "Unique_SKUs": rng.integers(1, 15, n_retail),
-            "Is_Bulk": 0
-        })
-        bulk_data = pd.DataFrame({
-            "Quantity": rng.integers(50, 600, n_bulk),
-            "UnitPrice": rng.uniform(2.0, 45.0, n_bulk),
-            "Is_UK": rng.choice([1, 0], size=n_bulk, p=[0.75, 0.25]),
-            "Is_Guest": rng.choice([0, 1], size=n_bulk, p=[0.95, 0.05]),
-            "Hour": rng.integers(9, 17, n_bulk),
-            "DayOfWeek": rng.integers(0, 5, n_bulk),
-            "Month": rng.choice([9, 10, 11, 12], size=n_bulk),
-            "Unique_SKUs": rng.integers(10, 80, n_bulk),
-            "Is_Bulk": 1
-        })
-        df = pd.concat([retail_data, bulk_data], ignore_index=True).sample(frac=1, random_state=42)
+        retail_data = pd.DataFrame(
+            {
+                "Quantity": rng.integers(1, 35, n_retail),
+                "UnitPrice": rng.uniform(1.5, 25.0, n_retail),
+                "Is_UK": rng.choice([1, 0], size=n_retail, p=[0.90, 0.10]),
+                "Is_Guest": rng.choice([0, 1], size=n_retail, p=[0.85, 0.15]),
+                "Hour": rng.integers(8, 20, n_retail),
+                "DayOfWeek": rng.integers(0, 7, n_retail),
+                "Month": rng.choice(range(1, 13), size=n_retail),
+                "Unique_SKUs": rng.integers(1, 15, n_retail),
+                "Is_Bulk": 0,
+            }
+        )
+
+        bulk_data = pd.DataFrame(
+            {
+                "Quantity": rng.integers(50, 600, n_bulk),
+                "UnitPrice": rng.uniform(2.0, 45.0, n_bulk),
+                "Is_UK": rng.choice([1, 0], size=n_bulk, p=[0.75, 0.25]),
+                "Is_Guest": rng.choice([0, 1], size=n_bulk, p=[0.95, 0.05]),
+                "Hour": rng.integers(9, 17, n_bulk),
+                "DayOfWeek": rng.integers(0, 5, n_bulk),
+                "Month": rng.choice([9, 10, 11, 12], size=n_bulk),
+                "Unique_SKUs": rng.integers(10, 80, n_bulk),
+                "Is_Bulk": 1,
+            }
+        )
+
+        df = (
+            pd.concat([retail_data, bulk_data], ignore_index=True)
+            .sample(frac=1, random_state=42)
+            .reset_index(drop=True)
+        )
         df["TotalRevenue"] = df["Quantity"] * df["UnitPrice"]
 
-    df["Segment"] = df["Is_Bulk"].map({1: "Bulk / Wholesale", 0: "Individual / Retail"})
+    df["Segment"] = df["Is_Bulk"].map(
+        {1: "Bulk / Wholesale", 0: "Individual / Retail"}
+    )
     return df
+
 
 @st.cache_resource
 def load_rf_pipeline(_df):
     try:
         model = joblib.load("best_rf_pipeline.joblib")
-    except FileNotFoundError:
+        expected_n = getattr(model, "n_features_in_", None)
+        if expected_n is not None and expected_n != len(FEATURE_COLS):
+            raise ValueError(
+                f"Expected {len(FEATURE_COLS)} features, but loaded model expects {expected_n}."
+            )
+        return model
+    except Exception:
         X = _df[FEATURE_COLS]
         y = _df["Is_Bulk"]
-        model = Pipeline([
-            ("scaler", StandardScaler()),
-            ("rf", RandomForestClassifier(n_estimators=100, max_depth=10, random_state=42, n_jobs=-1))
-        ])
+        model = Pipeline(
+            [
+                ("scaler", StandardScaler()),
+                (
+                    "rf",
+                    RandomForestClassifier(
+                        n_estimators=100, max_depth=10, random_state=42, n_jobs=-1
+                    ),
+                ),
+            ]
+        )
         model.fit(X, y)
-    return model
+        return model
+
 
 def apply_transparent_plotly(fig):
     fig.update_layout(
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         font=dict(color="#FFFFFF"),
-        xaxis=dict(gridcolor="rgba(255,255,255,0.12)", zerolinecolor="rgba(255,255,255,0.2)"),
-        yaxis=dict(gridcolor="rgba(255,255,255,0.12)", zerolinecolor="rgba(255,255,255,0.2)"),
-        legend=dict(bgcolor="rgba(0,0,0,0.4)", bordercolor="rgba(255,255,255,0.2)", borderwidth=1),
+        xaxis=dict(
+            gridcolor="rgba(255,255,255,0.12)", zerolinecolor="rgba(255,255,255,0.2)"
+        ),
+        yaxis=dict(
+            gridcolor="rgba(255,255,255,0.12)", zerolinecolor="rgba(255,255,255,0.2)"
+        ),
+        legend=dict(
+            bgcolor="rgba(0,0,0,0.4)",
+            bordercolor="rgba(255,255,255,0.2)",
+            borderwidth=1,
+        ),
     )
     return fig
+
 
 def compute_separability_metrics(df, target_features):
     bulk_df = df[df["Is_Bulk"] == 1]
@@ -189,31 +260,56 @@ def compute_separability_metrics(df, target_features):
     results = []
 
     for feat in target_features:
-        b_vals = bulk_df[feat].dropna().values
-        r_vals = retail_df[feat].dropna().values
+        b_vals = bulk_df[feat].dropna().to_numpy(dtype=float)
+        r_vals = retail_df[feat].dropna().to_numpy(dtype=float)
+
+        if len(b_vals) == 0 or len(r_vals) == 0:
+            results.append(
+                {
+                    "Feature": feat,
+                    "KS Statistic": 0.0,
+                    "KS p-value": "N/A",
+                    "KL Divergence (Bulk || Retail)": 0.0,
+                    "Separability Power": "Low",
+                }
+            )
+            continue
 
         ks_stat, p_val = ks_2samp(b_vals, r_vals)
+        combined = np.concatenate([b_vals, r_vals])
+        if np.ptp(combined) == 0:
+            kl_div = 0.0
+        else:
+            bins = np.histogram_bin_edges(combined, bins=30)
+            p_hist, _ = np.histogram(b_vals, bins=bins, density=True)
+            q_hist, _ = np.histogram(r_vals, bins=bins, density=True)
+            p_prob = (p_hist + 1e-10) / np.sum(p_hist + 1e-10)
+            q_prob = (q_hist + 1e-10) / np.sum(q_hist + 1e-10)
+            kl_div = float(entropy(p_prob, q_prob))
 
-        bins = np.histogram_bin_edges(np.concatenate([b_vals, r_vals]), bins=30)
-        p_hist, _ = np.histogram(b_vals, bins=bins, density=True)
-        q_hist, _ = np.histogram(r_vals, bins=bins, density=True)
+        results.append(
+            {
+                "Feature": feat,
+                "KS Statistic": round(float(ks_stat), 4),
+                "KS p-value": f"{p_val:.2e}",
+                "KL Divergence (Bulk || Retail)": round(kl_div, 4),
+                "Separability Power": (
+                    "High"
+                    if ks_stat > 0.35
+                    else ("Moderate" if ks_stat > 0.2 else "Low")
+                ),
+            }
+        )
 
-        p_prob = (p_hist + 1e-10) / np.sum(p_hist + 1e-10)
-        q_prob = (q_hist + 1e-10) / np.sum(q_hist + 1e-10)
-        kl_div = entropy(p_prob, q_prob)
-
-        results.append({
-            "Feature": feat,
-            "KS Statistic": round(ks_stat, 4),
-            "KS p-value": f"{p_val:.2e}",
-            "KL Divergence (Bulk || Retail)": round(kl_div, 4),
-            "Separability Power": "High" if ks_stat > 0.35 else ("Moderate" if ks_stat > 0.2 else "Low")
-        })
-
-    res_df = pd.DataFrame(results).sort_values(by="KS Statistic", ascending=False).reset_index(drop=True)
+    res_df = (
+        pd.DataFrame(results)
+        .sort_values(by="KS Statistic", ascending=False)
+        .reset_index(drop=True)
+    )
     res_df.index += 1
     res_df.index.name = "Rank"
     return res_df
+
 
 def get_feature_importances(pipeline, feature_names):
     if hasattr(pipeline, "named_steps"):
@@ -223,6 +319,7 @@ def get_feature_importances(pipeline, feature_names):
     elif hasattr(pipeline, "feature_importances_"):
         return dict(zip(feature_names, pipeline.feature_importances_))
     return {f: 1.0 / len(feature_names) for f in feature_names}
+
 
 df = load_ecommerce_data()
 rf_pipeline = load_rf_pipeline(df)
@@ -236,7 +333,6 @@ page = st.sidebar.radio(
 
 if page == "🏪 Executive Overview":
     st.title("🏪 E-Commerce Data Pipeline & Buyer Segmentation")
-
     total_orders = f"{len(df):,}"
     bulk_ratio = f"{(df['Is_Bulk'].mean() * 100):.1f}%"
     aov = f"£{df['TotalRevenue'].mean():,.2f}"
@@ -248,19 +344,15 @@ if page == "🏪 Executive Overview":
     col4.metric("Model Type", "Random Forest", "Ensemble Classifier")
 
     st.markdown("<br>", unsafe_allow_html=True)
-
     st.markdown(
         """
         <div class="glass-container">
             <h3>⚙️ End-to-End E-Commerce Data Engineering Pipeline</h3>
             <p>
-                Raw transactional retail logs contain cancellation invoices (prefix <code>'C'</code>), zero-price promotional adjustments, 
-                and split guest checkouts. Our pipeline reconciles returns proportionally against original purchases, preserves unauthenticated 
-                <b>Guest Checkout</b> orders via invoice-level grouping, and engineers spatial/temporal signals (<code>Is_UK</code>, Q4 seasonality, peak hours).
+                Raw transactional retail logs contain cancellation invoices (prefix <code>'C'</code>), zero-price promotional adjustments, and split guest checkouts. Our pipeline reconciles returns proportionally against original purchases, preserves unauthenticated <b>Guest Checkout</b> orders via invoice-level grouping, and engineers spatial/temporal signals (<code>Is_UK</code>, Q4 seasonality, peak hours).
             </p>
             <p>
-                Using <b>Random Forest</b>, we classify incoming orders in real time to distinguish high-volume <b>Bulk / Wholesale (B2B)</b> 
-                accounts from <b>Individual / Retail (B2C)</b> shoppers—enabling dynamic inventory allocation and targeted discounting.
+                Using <b>Random Forest</b>, we classify incoming orders in real time to distinguish high-volume <b>Bulk / Wholesale (B2B)</b> accounts from <b>Individual / Retail (B2C)</b> shoppers—enabling dynamic inventory allocation and targeted discounting.
             </p>
         </div>
         """,
@@ -299,7 +391,6 @@ if page == "🏪 Executive Overview":
 
 elif page == "📊 Strategic Analytics":
     st.title("📊 Strategic E-Commerce Analytics & Feature Separability")
-
     key_features = ["Quantity", "Unique_SKUs", "UnitPrice", "Hour"]
     importances = get_feature_importances(rf_pipeline, FEATURE_COLS)
 
@@ -308,8 +399,7 @@ elif page == "📊 Strategic Analytics":
         <div class="glass-container">
             <h3>📐 Statistical Feature Separability Ranking</h3>
             <p>
-                Measuring distribution divergence between <b>Bulk / Wholesale (B2B)</b> and <b>Individual / Retail (B2C)</b> orders 
-                using the two-sample <b>Kolmogorov-Smirnov (KS) Statistic</b> and <b>Kullback-Leibler (KL) Divergence</b>.
+                Measuring distribution divergence between <b>Bulk / Wholesale (B2B)</b> and <b>Individual / Retail (B2C)</b> orders using the two-sample <b>Kolmogorov-Smirnov (KS) Statistic</b> and <b>Kullback-Leibler (KL) Divergence</b>.
             </p>
         </div>
         """,
@@ -320,8 +410,7 @@ elif page == "📊 Strategic Analytics":
     st.dataframe(sep_df, use_container_width=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
-
-    viz_col1, viz_col2 = st.columns([1, 3])
+    viz_col1, _ = st.columns([1, 3])
     with viz_col1:
         plot_type = st.radio(
             "Select Distribution Visualization:",
@@ -350,7 +439,7 @@ elif page == "📊 Strategic Analytics":
 
         with chart_col:
             plot_df = df.copy()
-            if feat in ["Quantity", "UnitPrice"]:
+            if feat in ["Quantity", "UnitPrice"] and len(plot_df) > 0:
                 upper_cap = plot_df[feat].quantile(0.97)
                 plot_df = plot_df[plot_df[feat] <= upper_cap]
 
@@ -369,45 +458,39 @@ elif page == "📊 Strategic Analytics":
                     title=f"{feat} Distribution by Buyer Segment (Violin)",
                 )
             else:
-                b_vals = plot_df[plot_df["Is_Bulk"] == 1][feat].dropna().values
-                r_vals = plot_df[plot_df["Is_Bulk"] == 0][feat].dropna().values
-import numpy as np
-import plotly.graph_objects as go
-from scipy.stats import gaussian_kde
+                b_vals = plot_df[plot_df["Is_Bulk"] == 1][feat].dropna().to_numpy(dtype=float)
+                r_vals = plot_df[plot_df["Is_Bulk"] == 0][feat].dropna().to_numpy(dtype=float)
+                fig = go.Figure()
+                for label, vals, color in [
+                    ("Bulk / Wholesale", b_vals, "#39FF14"),
+                    ("Individual / Retail", r_vals, "#00C6FF"),
+                ]:
+                    clean_vals = vals[np.isfinite(vals)]
+                    if len(clean_vals) > 1 and np.std(clean_vals) > 0:
+                        kde = gaussian_kde(clean_vals)
+                        x_grid = np.linspace(clean_vals.min(), clean_vals.max(), 200)
+                        fig.add_trace(
+                            go.Scatter(
+                                x=x_grid,
+                                y=kde(x_grid),
+                                mode="lines",
+                                name=label,
+                                fill="tozeroy",
+                                line=dict(color=color, width=2),
+                            )
+                        )
+                fig.update_layout(
+                    title=f"{feat} Kernel Density Estimate (KDE)",
+                    xaxis_title=feat,
+                    yaxis_title="Density",
+                )
 
-fig = go.Figure()
+            fig = apply_transparent_plotly(fig)
+            st.plotly_chart(fig, use_container_width=True)
 
-for label, vals, color in [
-    ("Bulk / Wholesale", b_vals, "#39FF14"),
-    ("Individual / Retail", r_vals, "#00C6FF"),
-]:
-  clean_vals = np.asarray(vals, dtype=float)
-  clean_vals = clean_vals[np.isfinite(clean_vals)]
-
-  if len(clean_vals) > 1 and np.std(clean_vals) > 0:
-    kde = gaussian_kde(clean_vals)
-    x_grid = np.linspace(clean_vals.min(), clean_vals.max(), 200)
-    fig.add_trace(
-        go.Scatter(
-            x=x_grid,
-            y=kde(x_grid),
-            mode="lines",
-            name=label,
-            fill="tozeroy",
-            line=dict(color=color, width=2),
-        )
-    )
-
-fig.update_layout(
-    title=f"{feat} Kernel Density Estimate (KDE)",
-    xaxis_title=feat,
-    yaxis_title="Density",
-)
-fig = apply_transparent_plotly(fig)
-st.plotly_chart(fig, use_container_width=True)
- with insight_col:
-  imp_pct = importances.get(feat, 0.0) * 100
-  st.markdown(f"### 🧠 Model Attribution: `{feat}`")
+        with insight_col:
+            imp_pct = importances.get(feat, 0.0) * 100
+            st.markdown(f"### 🧠 Model Attribution: `{feat}`")
             st.markdown(f"**Random Forest Importance:** `{imp_pct:.2f}%`")
             st.markdown("---")
             st.markdown(f"**SHAP-Style Impact Analysis:**\n\n{shap_narratives[feat]}")
@@ -419,21 +502,19 @@ st.plotly_chart(fig, use_container_width=True)
         <div class="glass-container">
             <h3>🗺️ Principal Component Analysis (PCA) & Decision Boundary Approximation</h3>
             <p>
-                2D projection of the 8-dimensional order feature space overlaid with the Random Forest 
-                decision probability surface separating Bulk/Wholesale accounts from Individual Retail orders.
+                2D projection of the 8-dimensional order feature space overlaid with the Random Forest decision probability surface separating Bulk/Wholesale accounts from Individual Retail orders.
             </p>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    sample_df = df.sample(n=min(2500, len(df)), random_state=42)
+    sample_df = df.sample(n=min(2500, len(df)), random_state=42).copy()
     scaler_pca = StandardScaler()
     X_scaled = scaler_pca.fit_transform(sample_df[FEATURE_COLS])
 
     pca = PCA(n_components=2, random_state=42)
     pcs = pca.fit_transform(X_scaled)
-    sample_df = sample_df.copy()
     sample_df["PC1"] = pcs[:, 0]
     sample_df["PC2"] = pcs[:, 1]
 
@@ -451,15 +532,25 @@ st.plotly_chart(fig, use_container_width=True)
             x=grid_x,
             y=grid_y,
             z=zz,
-            colorscale=[[0, "rgba(0, 198, 255, 0.35)"], [0.5, "rgba(255, 255, 255, 0.1)"], [1, "rgba(57, 255, 20, 0.35)"]],
+            colorscale=[
+                [0, "rgba(0, 198, 255, 0.35)"],
+                [0.5, "rgba(255, 255, 255, 0.1)"],
+                [1, "rgba(57, 255, 20, 0.35)"],
+            ],
             contours=dict(start=0.0, end=1.0, size=0.1, showlines=True),
-            colorbar=dict(title="P(Bulk)", tickfont=dict(color="#FFFFFF"), titlefont=dict(color="#FFFFFF")),
+            colorbar=dict(
+                title=dict(text="P(Bulk)", font=dict(color="#FFFFFF")),
+                tickfont=dict(color="#FFFFFF"),
+            ),
             name="Decision Boundary",
             hoverinfo="skip",
         )
     )
 
-    for label_name, color_hex in [("Bulk / Wholesale", "#39FF14"), ("Individual / Retail", "#00C6FF")]:
+    for label_name, color_hex in [
+        ("Bulk / Wholesale", "#39FF14"),
+        ("Individual / Retail", "#00C6FF"),
+    ]:
         sub = sample_df[sample_df["Segment"] == label_name]
         fig_pca.add_trace(
             go.Scatter(
@@ -467,7 +558,12 @@ st.plotly_chart(fig, use_container_width=True)
                 y=sub["PC2"],
                 mode="markers",
                 name=label_name,
-                marker=dict(color=color_hex, size=6, opacity=0.75, line=dict(width=0.5, color="#000000")),
+                marker=dict(
+                    color=color_hex,
+                    size=6,
+                    opacity=0.75,
+                    line=dict(width=0.5, color="#000000"),
+                ),
             )
         )
 
@@ -483,13 +579,11 @@ st.plotly_chart(fig, use_container_width=True)
 
 elif page == "🤖 Order Classifier":
     st.title("🤖 Real-Time E-Commerce Order Classifier")
-
     st.markdown(
         """
         <div class="glass-container">
             <p>
-                Enter the order basket parameters below to classify whether an incoming checkout is a 
-                <b>Bulk / Wholesale (B2B)</b> or <b>Individual / Retail (B2C)</b> transaction using <code>best_rf_pipeline.joblib</code>.
+                Enter the order basket parameters below to classify whether an incoming checkout is a <b>Bulk / Wholesale (B2B)</b> or <b>Individual / Retail (B2C)</b> transaction using <code>best_rf_pipeline.joblib</code>.
             </p>
         </div>
         """,
@@ -498,41 +592,68 @@ elif page == "🤖 Order Classifier":
 
     with st.form("order_input_form"):
         col_left, col_right = st.columns(2)
-
         with col_left:
-            quantity = st.number_input("Total Quantity (Units)", min_value=1, value=75, step=1)
-            unit_price = st.number_input("Average Unit Price (£)", min_value=0.01, value=12.50, format="%.2f")
-            unique_skus = st.number_input("Unique SKUs in Basket", min_value=1, value=18, step=1)
-            is_uk = st.selectbox("Market Location (Is_UK)", options=[1, 0], format_func=lambda x: "United Kingdom (1)" if x == 1 else "International (0)")
-
+            quantity = st.number_input(
+                "Total Quantity (Units)", min_value=1, value=75, step=1
+            )
+            unit_price = st.number_input(
+                "Average Unit Price (£)", min_value=0.01, value=12.50, format="%.2f"
+            )
+            unique_skus = st.number_input(
+                "Unique SKUs in Basket", min_value=1, value=18, step=1
+            )
+            is_uk = st.selectbox(
+                "Market Location (Is_UK)",
+                options=[1, 0],
+                format_func=lambda x: (
+                    "United Kingdom (1)" if x == 1 else "International (0)"
+                ),
+            )
         with col_right:
-            is_guest = st.selectbox("Checkout Type (Is_Guest)", options=[0, 1], format_func=lambda x: "Registered Account (0)" if x == 0 else "Guest Checkout (1)")
+            is_guest = st.selectbox(
+                "Checkout Type (Is_Guest)",
+                options=[0, 1],
+                format_func=lambda x: (
+                    "Registered Account (0)" if x == 0 else "Guest Checkout (1)"
+                ),
+            )
             hour = st.slider("Order Hour (24h)", min_value=0, max_value=23, value=14)
             day_of_week = st.selectbox(
                 "Day of Week",
                 options=[0, 1, 2, 3, 4, 5, 6],
                 index=2,
-                format_func=lambda x: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"][x],
+                format_func=lambda x: [
+                    "Monday",
+                    "Tuesday",
+                    "Wednesday",
+                    "Thursday",
+                    "Friday",
+                    "Saturday",
+                    "Sunday",
+                ][x],
             )
             month = st.slider("Month (1-12)", min_value=1, max_value=12, value=11)
 
         submitted = st.form_submit_button("Analyze Order")
 
     if submitted:
-        input_data = pd.DataFrame([{
-            "Quantity": quantity,
-            "UnitPrice": unit_price,
-            "Is_UK": is_uk,
-            "Is_Guest": is_guest,
-            "Hour": hour,
-            "DayOfWeek": day_of_week,
-            "Month": month,
-            "Unique_SKUs": unique_skus,
-        }])[FEATURE_COLS]
+        input_data = pd.DataFrame(
+            [
+                {
+                    "Quantity": quantity,
+                    "UnitPrice": unit_price,
+                    "Is_UK": is_uk,
+                    "Is_Guest": is_guest,
+                    "Hour": hour,
+                    "DayOfWeek": day_of_week,
+                    "Month": month,
+                    "Unique_SKUs": unique_skus,
+                }
+            ]
+        )[FEATURE_COLS]
 
         probs = rf_pipeline.predict_proba(input_data)[0]
         pred_class = int(rf_pipeline.predict(input_data)[0])
-
         is_bulk = pred_class == 1
         confidence = probs[1] * 100 if is_bulk else probs[0] * 100
         result_title = "BULK / WHOLESALE (B2B)" if is_bulk else "INDIVIDUAL / RETAIL (B2C)"
@@ -540,22 +661,15 @@ elif page == "🤖 Order Classifier":
         est_revenue = quantity * unit_price
 
         res_col1, res_col2 = st.columns([1, 1])
-
         with res_col1:
+            st.markdown('<div class="glass-container" style="text-align: center; padding: 32px 20px;">', unsafe_allow_html=True)
+            st.markdown("#### Order Classification Verdict")
+            st.markdown(f"## {result_title}")
+            st.markdown(f"**Estimated Basket Value:** £{est_revenue:,.2f}")
             st.markdown(
-                f"""
-                <div class="glass-container" style="border: 2px solid {result_color}; text-align: center; padding: 40px 20px;">
-                    <h4>Order Classification Verdict</h4>
-                    <h1 style="color: {result_color}; font-size: 2.2rem; margin: 15px 0;">{result_title}</h1>
-                    <p style="font-size: 1.1rem;">
-                        Estimated Basket Value: <b>£{est_revenue:,.2f}</b><br>
-                        Bulk Probability: <b>{probs[1]*100:.2f}%</b> &nbsp;|&nbsp; 
-                        Retail Probability: <b>{probs[0]*100:.2f}%</b>
-                    </p>
-                </div>
-                """,
-                unsafe_allow_html=True,
+                f"**Bulk Probability:** `{probs[1] * 100:.2f}%` | **Retail Probability:** `{probs[0] * 100:.2f}%`"
             )
+            st.markdown("</div>", unsafe_allow_html=True)
 
         with res_col2:
             fig_gauge = go.Figure(
@@ -563,9 +677,16 @@ elif page == "🤖 Order Classifier":
                     mode="gauge+number",
                     value=confidence,
                     number={"suffix": "%", "font": {"color": "#FFFFFF", "size": 44}},
-                    title={"text": "Prediction Confidence", "font": {"color": "#FFFFFF", "size": 20}},
+                    title={
+                        "text": "Prediction Confidence",
+                        "font": {"color": "#FFFFFF", "size": 20},
+                    },
                     gauge={
-                        "axis": {"range": [0, 100], "tickcolor": "#FFFFFF", "tickfont": {"color": "#FFFFFF"}},
+                        "axis": {
+                            "range": [0, 100],
+                            "tickcolor": "#FFFFFF",
+                            "tickfont": {"color": "#FFFFFF"},
+                        },
                         "bar": {"color": result_color},
                         "bgcolor": "rgba(255, 255, 255, 0.1)",
                         "borderwidth": 2,
