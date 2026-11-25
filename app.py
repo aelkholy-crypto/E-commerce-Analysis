@@ -403,8 +403,8 @@ fig.update_layout(
     xaxis_title=feat,
     yaxis_title="Density",
 )
-            fig = apply_transparent_plotly(fig)
-            st.plotly_chart(fig, use_container_width=True)
+fig = apply_transparent_plotly(fig)
+st.plotly_chart(fig, use_container_width=True)
 
         with insight_col:
             imp_pct = importances.get(feat, 0.0) * 100
